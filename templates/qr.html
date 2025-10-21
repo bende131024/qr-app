@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Új raklap / QR</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background:#f8f9fa; }
+    .container { max-width: 640px; margin: 16px auto; }
+    .card { border-radius: 14px; box-shadow: 0 6px 18px rgba(0,0,0,.06); }
+    .qr-box { text-align:center; padding: 12px; background:#fff; border-radius:12px; }
+    .qr-box img { width: 100%; max-width: 320px; height:auto; }
+    .field { margin-bottom: 12px; }
+    .btn-lg { border-radius: 12px; }
+    .hint { color:#6c757d; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card p-3 p-md-4">
+      <h3 class="mb-3">Új raklap felvétele</h3>
+      <form method="post" class="mb-3">
+        <div class="field">
+          <label class="form-label">Azonosító (opcionális)</label>
+          <div class="input-group">
+            <input type="text" class="form-control" name="Azonosító" id="azon" placeholder="Ha üres, automatikus generálás">
+            <button type="button" class="btn btn-outline-secondary" id="genBtn">Generálás</button>
+          </div>
+          <div class="hint">A QR a <code>/edit/&lt;Azonosító&gt;</code> oldalra mutat.</div>
+        </div>
+
+        {% for field in mezok if field != 'Azonosító' %}
+          {% if field in listak %}
+            <div class="field">
+              <label class="form-label">{{ field }}</label>
+              <select class="form-select" name="{{ field }}">
+                {% for op in listak[field] %}
+                  <option value="{{ op }}">{{ op }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          {% else %}
+            <div class="field">
+              <label class="form-label">{{ field }}</label>
+              <input type="text" class="form-control" name="{{ field }}" placeholder="{{ field }}">
+            </div>
+          {% endif %}
+        {% endfor %}
+
+        <button type="submit" class="btn btn-primary btn-lg w-100">Hozzáadás + QR</button>
+      </form>
+
+      {% if created %}
+      <div class="qr-box mb-2">
+        <div class="mb-2"><strong>Hozzáadva:</strong> {{ created }}</div>
+        <img alt="QR" src="{{ url_for('qr_image', azonosito=created) }}">
+        <div class="hint mt-2">Telefonon hosszú nyomással menthető/nyomtatható.</div>
+        <a class="btn btn-outline-primary w-100 mt-2" href="{{ url_for('edit_row', azonosito=created) }}">Megnyitás / szerkesztés</a>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  <script>
+    function randId(len=8){
+      const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      let s=''; for(let i=0;i<len;i++) s+=chars[Math.floor(Math.random()*chars.length)];
+      return s;
+    }
+    document.getElementById('genBtn').addEventListener('click', ()=>{
+      document.getElementById('azon').value = randId();
+    });
+  </script>
+</body>
+</html>
