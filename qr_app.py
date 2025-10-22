@@ -3,13 +3,15 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 import json
 import qrcode
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw, ImageFont
 import tempfile
 import os
 import platform
 import tkinter.font as tkfont
 import requests
 import uuid
+import certifi
+REQ = {"timeout": 15, "verify": certifi.where()}
 
 # Szerver URL (frissítsd a Render URL-re telepítés után, pl. https://your-app.onrender.com)
 SERVER_URL = "https://qr-app-emfo.onrender.com"  # Helyi teszteléshez; frissítsd a Render URL-re!
@@ -33,29 +35,45 @@ listak = {
 # --- API segédfunkciók ---
 def api_get_data():
     try:
-        response = requests.get(f"{SERVER_URL}/data")
-        response.raise_for_status()
-        return response.json()
+        r = requests.get(f"{SERVER_URL}/data", **REQ)
+        if r.status_code >= 400:
+            messagebox.showerror("Szerver hiba", f"GET /data -> {r.status_code}\n{r.text[:400]}")
+            return None
+        return r.json()
+    except requests.exceptions.SSLError as e:
+        messagebox.showerror("SSL hiba", f"Tanúsítvány/HTTPS gond: {e}")
+        return None
     except Exception as e:
-        messagebox.showerror("Hiba", f"Szerver hiba: {e}")
+        messagebox.showerror("Hiba", f"GET /data kivétel: {e}")
         return None
 
 def api_update_data(full_data):
     try:
-        response = requests.post(f"{SERVER_URL}/update", json=full_data)
-        response.raise_for_status()
+        r = requests.post(f"{SERVER_URL}/update", json=full_data, **REQ)
+        if r.status_code >= 400:
+            messagebox.showerror("Szerver hiba", f"POST /update -> {r.status_code}\n{r.text[:400]}")
+            return False
         return True
+    except requests.exceptions.SSLError as e:
+        messagebox.showerror("SSL hiba", f"Tanúsítvány/HTTPS gond: {e}")
+        return False
     except Exception as e:
-        messagebox.showerror("Hiba", f"Szerver hiba: {e}")
+        messagebox.showerror("Hiba", f"POST /update kivétel: {e}")
         return False
 
-def api_update_row(azonosito, row_data):
+def api_update_row(mezok_list, listak_dict, row_data):
     try:
-        response = requests.put(f"{SERVER_URL}/edit/{azonosito}", json=row_data)
-        response.raise_for_status()
+        payload = {"mezok": mezok_list, "listak": listak_dict, "adatok": [row_data]}
+        r = requests.post(f"{SERVER_URL}/update", json=payload, **REQ)
+        if r.status_code >= 400:
+            messagebox.showerror("Szerver hiba", f"POST /update (1 rekord) -> {r.status_code}\n{r.text[:400]}")
+            return False
         return True
+    except requests.exceptions.SSLError as e:
+        messagebox.showerror("SSL hiba", f"Tanúsítvány/HTTPS gond: {e}")
+        return False
     except Exception as e:
-        messagebox.showerror("Hiba", f"Szerver hiba: {e}")
+        messagebox.showerror("Hiba", f"POST /update kivétel: {e}")
         return False
 
 # --- Szinkronizálás szerverrel ---
@@ -289,29 +307,33 @@ def sor_beviteli_ablak(modositott_sor=None, idx=None):
         if modositott_sor and idx is not None:
             sor["Azonosító"] = modositott_sor["Azonosító"]
             adatok[idx] = sor
-            if not api_update_row(sor["Azonosító"], sor):
+            # egy rekord upsert /update-re
+            if not api_update_row(mezok, listak, sor):
                 return
         else:
+            # új rekord — generáljunk egyedi azonosítót
             azonosito = str(uuid.uuid4())
             sor["Azonosító"] = azonosito
             if any(d.get("Azonosító") == azonosito for d in adatok):
                 messagebox.showerror("Hiba", "Az azonosító már létezik!")
                 return
             adatok.append(sor)
+            # és szinkron a szerverre
+            if not api_update_row(mezok, listak, sor):
+                return
 
-        sync_to_server()
         update_tree()
         ablak.destroy()
 
     tk.Button(ablak, text="Mentés", command=ment).grid(row=len(mezok), column=0, columnspan=2, pady=10)
 
-# --- Sor törlés ---
+# --- Sor törlés (helyi) ---
 def torles():
     selected = tree.selection()
     if not selected:
         messagebox.showwarning("Figyelem", "Válassz ki egy sort a törléshez!")
         return
-    if messagebox.askyesno("Törlés", "Biztosan törlöd a kiválasztott sort?"):
+    if messagebox.askyesno("Törlés", "Biztosan törlöd a kiválasztott sort? (Szerverről nem törli automatikusan!)"):
         for i in reversed(selected):
             del adatok[int(i)]
         sync_to_server()
@@ -448,10 +470,12 @@ def qr_generalas():
         qr = qrcode.QRCode(version=1, box_size=10, border=5)
         qr.add_data(qr_data)
         qr.make(fit=True)
-        img = qr.make_image(fill="black", back_color="white")
+        img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
         qr_images.append(img)
 
-        img_tk = ImageTk.PhotoImage(img)
+        # a megjelenítéshez készítünk kicsinyített fotót
+        disp = img.resize((260, 260), getattr(Image, "LANCZOS", Image.BICUBIC))
+        img_tk = ImageTk.PhotoImage(disp)
 
         qr_item_frame = tk.Frame(scrollable_frame, borderwidth=2, relief="solid", pady=10)
         label = tk.Label(qr_item_frame, text=f"Azonosító: {sor['Azonosító']}")
@@ -570,8 +594,120 @@ vsb_main.pack(side="right", fill="y")
 hsb_main.pack(side="bottom", fill="x")
 tree.pack(fill="both", expand=True, padx=10, pady=10)
 
+# === 100% PDF nyomtató gomb függvénye ===
+def pdf_100_nyomtat():
+    """
+    Multi-oldalas A4 PDF generálása (2x2 felosztás), majd 100%-os nyomtatás.
+    Windows alatt SumatraPDF-bel: -print-settings "noscale". Ha nincs Sumatra, megnyitjuk a PDF-et.
+    """
+    try:
+        DPI = 300
+        pages, A4_W, A4_H = build_pages_fullA4_from_selection(DPI=DPI)
+        if not pages:
+            return
+        import tempfile, os, subprocess, sys
+        # Ideiglenes PDF
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        path = tmp.name; tmp.close()
+        first, rest = pages[0], pages[1:]
+        first.save(path, save_all=True, append_images=rest, resolution=DPI)
+        # Próbáljuk SumatraPDF-et (noscale)
+        candidates = [
+            r"C:\Program Files\SumatraPDF\SumatraPDF.exe",
+            r"C:\Program Files (x86)\SumatraPDF\SumatraPDF.exe",
+            os.path.join(os.path.dirname(sys.executable), "SumatraPDF.exe"),
+            os.path.join(os.getcwd(), "SumatraPDF.exe"),
+        ]
+        exe = None
+        for c in candidates:
+            if os.path.exists(c):
+                exe = c; break
+        if exe:
+            # default printer, noscale, silent
+            cmd = f'"{exe}" -print-to-default -print-settings "noscale" -silent "{path}"'
+            try:
+                subprocess.run(cmd, shell=True, check=True)
+                messagebox.showinfo("Nyomtatás", "Elküldve a nyomtatóra (100%, noscale).")
+                return
+            except Exception:
+                pass
+        # Fallback: megnyitjuk a PDF-et, hogy kézzel tudd 100%-on nyomtatni
+        try:
+            os.startfile(path)
+            messagebox.showinfo("Nyomtatás", "Megnyílt a PDF. Válaszd a 'Tényleges méret / 100%' beállítást a nyomtatón.")
+        except Exception as e:
+            messagebox.showwarning("Figyelem", f"Nem sikerült automatikusan megnyitni a PDF-et: {path}")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        messagebox.showerror("Hiba", f"Hiba a PDF nyomtatás során: {e}")
+
+# === A4 2x2 oldalépítő (100% PDF nyomtatáshoz) ===
+def build_pages_fullA4_from_selection(DPI=300):
+    """
+    A4 (210x297mm) 2x2 teljes felosztás, margó nélkül, felirat nélkül.
+    Visszatér: (pages_list, A4_W, A4_H)
+    """
+    selected = tree.selection()
+    if not selected:
+        messagebox.showwarning("Figyelem", "Válassz ki legalább egy sort a nyomtatáshoz!")
+        return [], 0, 0
+
+    def mm_to_px(mm):
+        return int(round(mm / 25.4 * DPI))
+
+    A4_W = mm_to_px(210)
+    A4_H = mm_to_px(297)
+    SLOT_W = A4_W // 2
+    SLOT_H = A4_H // 2
+    LEFT_MARGIN = 0
+    TOP_MARGIN = 0
+    INSET = 0
+
+    # QR képek
+    items = []
+    for i in selected:
+        sor = adatok[int(i)]
+        az = sor.get("Azonosító", "") if isinstance(sor, dict) else sor["Azonosító"]
+        qr_data = f"{SERVER_URL}/edit/{az}"
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(qr_data); qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        items.append((img, ""))
+
+    while len(items) % 4 != 0:
+        items.append((Image.new("RGB", (300, 300), "white"), ""))
+
+    pages = []
+    for start in range(0, len(items), 4):
+        page = Image.new("RGB", (A4_W, A4_H), "white")
+        draw = ImageDraw.Draw(page)
+        positions = [
+            (LEFT_MARGIN + 0 * SLOT_W, TOP_MARGIN + 0 * SLOT_H),
+            (LEFT_MARGIN + 1 * SLOT_W, TOP_MARGIN + 0 * SLOT_H),
+            (LEFT_MARGIN + 0 * SLOT_W, TOP_MARGIN + 1 * SLOT_H),
+            (LEFT_MARGIN + 1 * SLOT_W, TOP_MARGIN + 1 * SLOT_H),
+        ]
+        for (qr_img, _), (x, y) in zip(items[start:start+4], positions):
+            target_w = SLOT_W - 2 * INSET
+            target_h = SLOT_H - 2 * INSET
+            side = min(target_w, target_h)
+            resample = getattr(Image, 'LANCZOS', Image.BICUBIC)
+            qr_resized = qr_img.resize((side, side), resample)
+            qr_x = x + (SLOT_W - side) // 2
+            qr_y = y + (SLOT_H - side) // 2
+            page.paste(qr_resized, (qr_x, qr_y))
+        pages.append(page)
+
+    return pages, A4_W, A4_H
+
 frame = tk.Frame(root)
 frame.pack(pady=10)
+
+# --- Extra gombsor a nyomtatáshoz (külön frame-ben, hogy ne borítsa az elrendezést) ---
+frame_4up = tk.Frame(root)
+frame_4up.pack(pady=4)
+tk.Button(frame_4up, text="A4 4× QR – PDF", command=pdf_100_nyomtat).pack()
 
 tk.Button(frame, text="Új sor", command=lambda: sor_beviteli_ablak()).grid(row=0, column=0, padx=5)
 tk.Button(frame, text="Módosítás", command=modositas).grid(row=0, column=1, padx=5)
