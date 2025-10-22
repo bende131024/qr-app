@@ -10,6 +10,8 @@ import platform
 import tkinter.font as tkfont
 import requests
 import uuid
+import certifi
+REQ = {"timeout": 15, "verify": certifi.where()}
 
 # Szerver URL (frissítsd a Render URL-re telepítés után, pl. https://your-app.onrender.com)
 SERVER_URL = "https://qr-app-emfo.onrender.com"  # Helyi teszteléshez; frissítsd a Render URL-re!
@@ -33,39 +35,45 @@ listak = {
 # --- API segédfunkciók ---
 def api_get_data():
     try:
-        response = requests.get(f"{SERVER_URL}/data", timeout=10)
-        response.raise_for_status()
-        return response.json()
+        r = requests.get(f"{SERVER_URL}/data", **REQ)
+        if r.status_code >= 400:
+            messagebox.showerror("Szerver hiba", f"GET /data -> {r.status_code}\n{r.text[:400]}")
+            return None
+        return r.json()
+    except requests.exceptions.SSLError as e:
+        messagebox.showerror("SSL hiba", f"Tanúsítvány/HTTPS gond: {e}")
+        return None
     except Exception as e:
-        messagebox.showerror("Hiba", f"Szerver hiba: {e}")
+        messagebox.showerror("Hiba", f"GET /data kivétel: {e}")
         return None
 
 def api_update_data(full_data):
-    """Teljes push /update-re (mezők + listák + összes adat) – a szerver upsert-el Azonosító alapján."""
     try:
-        response = requests.post(f"{SERVER_URL}/update", json=full_data, timeout=20)
-        response.raise_for_status()
+        r = requests.post(f"{SERVER_URL}/update", json=full_data, **REQ)
+        if r.status_code >= 400:
+            messagebox.showerror("Szerver hiba", f"POST /update -> {r.status_code}\n{r.text[:400]}")
+            return False
         return True
+    except requests.exceptions.SSLError as e:
+        messagebox.showerror("SSL hiba", f"Tanúsítvány/HTTPS gond: {e}")
+        return False
     except Exception as e:
-        messagebox.showerror("Hiba", f"Szerver hiba: {e}")
+        messagebox.showerror("Hiba", f"POST /update kivétel: {e}")
         return False
 
 def api_update_row(mezok_list, listak_dict, row_data):
-    """
-    EGY rekord upsert /update-re, nem /edit PUT-ra.
-    Így a szerver biztosan érti (ugyanaz, mint a teljes push, csak 1 adatlappal).
-    """
     try:
-        payload = {
-            "mezok": mezok_list,
-            "listak": listak_dict,
-            "adatok": [row_data],
-        }
-        response = requests.post(f"{SERVER_URL}/update", json=payload, timeout=15)
-        response.raise_for_status()
+        payload = {"mezok": mezok_list, "listak": listak_dict, "adatok": [row_data]}
+        r = requests.post(f"{SERVER_URL}/update", json=payload, **REQ)
+        if r.status_code >= 400:
+            messagebox.showerror("Szerver hiba", f"POST /update (1 rekord) -> {r.status_code}\n{r.text[:400]}")
+            return False
         return True
+    except requests.exceptions.SSLError as e:
+        messagebox.showerror("SSL hiba", f"Tanúsítvány/HTTPS gond: {e}")
+        return False
     except Exception as e:
-        messagebox.showerror("Hiba", f"Szerver hiba: {e}")
+        messagebox.showerror("Hiba", f"POST /update kivétel: {e}")
         return False
 
 # --- Szinkronizálás szerverrel ---
