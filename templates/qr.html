@@ -12,8 +12,8 @@
     .qr-box { text-align:center; padding: 12px; background:#fff; border-radius:12px; }
     .qr-box img { width: 100%; max-width: 320px; height:auto; }
     .field { margin-bottom: 12px; }
-    .btn-lg { border-radius: 12px; }
     .hint { color:#6c757d; font-size: .9rem; }
+    .btn-lg { border-radius: 12px; }
   </style>
 </head>
 <body>
@@ -26,15 +26,7 @@
       {% endif %}
 
       <form method="post" class="mb-3">
-        <div class="field">
-          <label class="form-label">Azonosító (opcionális)</label>
-          <div class="input-group">
-            <input type="text" class="form-control" name="Azonosító" id="azon" placeholder="Ha üres, automatikus generálás">
-            <button type="button" class="btn btn-outline-secondary" id="genBtn">Generálás</button>
-          </div>
-          <div class="hint">A QR a <code>/edit/&lt;Azonosító&gt;</code> oldalra mutat.</div>
-        </div>
-
+        <!-- Azonosítót NEM kérünk: a szerver automatikusan generál -->
         {% for field in mezok if field != 'Azonosító' %}
           {% if field in listak %}
             <div class="field">
@@ -55,6 +47,7 @@
         {% endfor %}
 
         <button type="submit" class="btn btn-primary btn-lg w-100">Hozzáadás + QR</button>
+        <div class="hint mt-2">Az azonosítót a rendszer automatikusan hozza létre.</div>
       </form>
 
       {% if created %}
@@ -67,16 +60,5 @@
       {% endif %}
     </div>
   </div>
-
-  <script>
-    function randId(len=8){
-      const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-      let s=''; for(let i=0;i<len;i++) s+=chars[Math.floor(Math.random()*chars.length)];
-      return s;
-    }
-    document.getElementById('genBtn').addEventListener('click', ()=>{
-      document.getElementById('azon').value = randId();
-    });
-  </script>
 </body>
 </html>
