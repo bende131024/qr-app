@@ -20,6 +20,11 @@
   <div class="container">
     <div class="card p-3 p-md-4">
       <h3 class="mb-3">Új raklap felvétele</h3>
+
+      {% if msg %}
+        <div class="alert alert-warning">{{ msg }}</div>
+      {% endif %}
+
       <form method="post" class="mb-3">
         <div class="field">
           <label class="form-label">Azonosító (opcionális)</label>
@@ -35,6 +40,7 @@
             <div class="field">
               <label class="form-label">{{ field }}</label>
               <select class="form-select" name="{{ field }}">
+                <option value=""></option>
                 {% for op in listak[field] %}
                   <option value="{{ op }}">{{ op }}</option>
                 {% endfor %}
@@ -61,6 +67,7 @@
       {% endif %}
     </div>
   </div>
+
   <script>
     function randId(len=8){
       const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';

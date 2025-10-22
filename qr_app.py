@@ -1,4 +1,4 @@
-# qr_app.py (frissített: mezők szerkesztése, hozzáadása, törlése, sorrend változtatása)
+# qr_app.py (desktop) — mezők/legördülők szerkesztése, szerver szinkron, A4 2x2 PDF, szerveres törlés
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 import json
@@ -10,29 +10,38 @@ import platform
 import tkinter.font as tkfont
 import requests
 import uuid
-import certifi
-REQ = {"timeout": 15, "verify": certifi.where()}
 
-# Szerver URL (frissítsd a Render URL-re telepítés után, pl. https://your-app.onrender.com)
-SERVER_URL = "https://qr-app-emfo.onrender.com"  # Helyi teszteléshez; frissítsd a Render URL-re!
+# (Ajánlott) TLS cert megbízhatóság Windows alatt
+try:
+    import certifi
+    REQ = {"timeout": 15, "verify": certifi.where()}
+except Exception:
+    REQ = {"timeout": 15}
 
-# --- Globális változók és adatok ---
+# ====== ÁLLÍTSD A SAJÁT DOMAINEDRE ======
+SERVER_URL = "https://qr-app-emfo.onrender.com"
+
+# --- Globális adatok ---
 adatok = []
-fix_mezok = ["Azonosító", "Sorszám", "Fémzárszám", "Beszállító", "Név", "Fok", "Hely", "Súly", "Megjegyzés", "Osztály"]
+fix_mezok = [
+    "Azonosító", "Sorszám", "Fémzárszám",
+    "Beszállító", "Név", "Fok", "Hely",
+    "Súly", "Megjegyzés", "Osztály"
+]
 mezok = fix_mezok.copy()
 
-# Legördülő lista opciók
-beszallito_opciok = ["Beszállító 1", "Beszállító 2", "Beszállító 3"]
-hely_opciok = ["Raktár A", "Raktár B", "Kijelölt hely"]
-osztaly_opciok = ["Fénykép", "Eladva", "Javításra"]
-
+# Legördülő opciók (alap; szinkron után a szerver felülírhatja)
 listak = {
-    "Beszállító": beszallito_opciok,
-    "Hely": hely_opciok,
-    "Osztály": osztaly_opciok
+    "Beszállító": ["Beszállító 1", "Beszállító 2", "Beszállító 3"],
+    "Hely": ["Raktár A", "Raktár B", "Kijelölt hely"],
+    "Osztály": ["Fénykép", "Eladva", "Javításra"],
 }
 
-# --- API segédfunkciók ---
+# --- Hasznos ---
+def gen_id(n=8):
+    return uuid.uuid4().hex[:n].upper()
+
+# --- API segédfüggvények ---
 def api_get_data():
     try:
         r = requests.get(f"{SERVER_URL}/data", **REQ)
@@ -48,6 +57,7 @@ def api_get_data():
         return None
 
 def api_update_data(full_data):
+    """Teljes push /update-re (mezők + listák + összes adat); a szerver upsert-el Azonosító alapján."""
     try:
         r = requests.post(f"{SERVER_URL}/update", json=full_data, **REQ)
         if r.status_code >= 400:
@@ -62,39 +72,51 @@ def api_update_data(full_data):
         return False
 
 def api_update_row(mezok_list, listak_dict, row_data):
+    """EGY rekord upsert /update-re (a szerver így is érti)."""
     try:
         payload = {"mezok": mezok_list, "listak": listak_dict, "adatok": [row_data]}
         r = requests.post(f"{SERVER_URL}/update", json=payload, **REQ)
         if r.status_code >= 400:
-            messagebox.showerror("Szerver hiba", f"POST /update (1 rekord) -> {r.status_code}\n{r.text[:400]}")
+            messagebox.showerror("Szerver hiba", f"POST /update (1) -> {r.status_code}\n{r.text[:400]}")
             return False
         return True
-    except requests.exceptions.SSLError as e:
-        messagebox.showerror("SSL hiba", f"Tanúsítvány/HTTPS gond: {e}")
-        return False
     except Exception as e:
         messagebox.showerror("Hiba", f"POST /update kivétel: {e}")
         return False
 
-# --- Szinkronizálás szerverrel ---
+def api_delete_rows(azonositok):
+    """Tételek törlése (soft delete) a szerveren, hogy ne jöjjenek vissza szinkronnál."""
+    try:
+        r = requests.post(f"{SERVER_URL}/delete", json={"azonositok": azonositok}, **REQ)
+        if r.status_code >= 400:
+            messagebox.showerror("Szerver hiba", f"POST /delete -> {r.status_code}\n{r.text[:400]}")
+            return False
+        return True
+    except Exception as e:
+        messagebox.showerror("Hiba", f"Törlés szerveren nem sikerült:\n{e}")
+        return False
+
+# --- Szinkron ---
 def sync_from_server():
     global adatok, mezok, listak
     data = api_get_data()
-    if data:
-        adatok = data.get("adatok", [])
-        mezok = data.get("mezok", fix_mezok.copy())
-        listak = data.get("listak", {})
-        update_tree()
-        messagebox.showinfo("Szinkronizálva", "Adatok szinkronizálva a szerverrel.")
+    if not data:
+        return
+    adatok = data.get("adatok", [])
+    mezok = data.get("mezok", fix_mezok.copy())
+    listak = data.get("listak", {})
+    update_tree()
+    messagebox.showinfo("Szinkron", "Szerver → helyi szinkron kész.")
 
 def sync_to_server():
-    full_data = {"mezok": mezok, "adatok": adatok, "listak": listak}
-    if api_update_data(full_data):
-        messagebox.showinfo("Mentve", "Adatok mentve a szerverre.")
+    """Összes jelenlegi rekord + mezők + legördülők felküldése (upsert)."""
+    full = {"mezok": mezok, "listak": listak, "adatok": adatok}
+    if api_update_data(full):
+        messagebox.showinfo("Mentés", "Adatok mentve a szerverre.")
 
-# --- Treeview frissítése (főablak) ---
+# --- UI: táblázat ---
 def update_tree():
-    # "Azonosító" működjön, de ne legyen látható a táblában
+    # Azonosító marad használatban, de nem jelenítjük meg oszlopként
     display_columns = [c for c in mezok if c != "Azonosító"]
     tree["columns"] = display_columns
     tree["show"] = "headings"
@@ -108,9 +130,9 @@ def update_tree():
     for idx, sor in enumerate(adatok):
         values = [sor.get(f, "") for f in display_columns]
         tree.insert("", "end", iid=idx, values=values)
+
     resize_columns()
 
-# --- Oszlopok átméretezése ---
 def resize_columns():
     factor = scale.get()
     cell_font = tkfont.Font(family="Arial", size=factor)
@@ -120,497 +142,340 @@ def resize_columns():
         heading_width = heading_font.measure(tree.heading(col)["text"]) + 20
         max_cell_width = 0
         for child in tree.get_children():
-            cell_value = tree.set(child, col)
-            cell_width = cell_font.measure(cell_value) + 20
-            if cell_width > max_cell_width:
-                max_cell_width = cell_width
+            val = tree.set(child, col)
+            w = cell_font.measure(val) + 20
+            if w > max_cell_width:
+                max_cell_width = w
         new_width = max(heading_width, max_cell_width, 150)
         tree.column(col, width=new_width)
 
     tree.update_idletasks()
 
-# --- Mezők kezelése (hozzáadás / törlés / átnevezés / sorrend) ---
+# --- Mezők kezelése ---
 def mezok_kezelese():
-    ablak = tk.Toplevel(root)
-    ablak.title("Mezők szerkesztése")
-    ablak.geometry("400x400")
+    ablak = tk.Toplevel(root); ablak.title("Mezők szerkesztése"); ablak.geometry("400x420")
+    lb = tk.Listbox(ablak, selectmode="browse"); lb.pack(fill="both", expand=True, padx=10, pady=10)
 
-    lb = tk.Listbox(ablak, selectmode="browse")
-    lb.pack(fill="both", expand=True, padx=10, pady=10)
-    def refresh_listbox():
+    def refresh():
         lb.delete(0, tk.END)
         for m in mezok:
             lb.insert(tk.END, m)
-    refresh_listbox()
 
-    def uj_mezo():
+    def uj():
         neve = simpledialog.askstring("Új mező", "Mező neve:", parent=ablak)
-        if neve:
-            if neve in mezok:
-                messagebox.showwarning("Figyelem", "Már létezik ilyen mező!")
-                return
-            mezok.append(neve)
-            # frissítsük minden adatsorban az új kulcsot (üres értékkel)
-            for r in adatok:
-                r.setdefault(neve, "")
-            refresh_listbox()
-            update_tree()
-            sync_to_server()
+        if not neve: return
+        if neve in mezok:
+            messagebox.showwarning("Figyelem", "Már létezik ilyen mező!")
+            return
+        mezok.append(neve)
+        for r in adatok:
+            r.setdefault(neve, "")
+        refresh(); update_tree(); sync_to_server()
 
-    def torol_mezo():
+    def torol():
         sel = lb.curselection()
         if not sel:
-            messagebox.showwarning("Figyelem", "Válassz ki egy mezőt a törléshez!")
+            messagebox.showwarning("Figyelem", "Válassz ki egy mezőt!")
             return
-        idx = sel[0]
-        nev = mezok[idx]
+        idx = sel[0]; nev = mezok[idx]
         if nev == "Azonosító":
-            messagebox.showerror("Hiba", "Az 'Azonosító' mezőt nem lehet törölni!")
+            messagebox.showerror("Hiba", "Az 'Azonosító' mezőt nem törölheted.")
             return
-        if messagebox.askyesno("Törlés", f"Törlöd a(z) '{nev}' mezőt? Ez eltávolítja a mező értékét minden sorból."):
-            # eltávolítjuk a mezőt a mezok-ból és az adatokból, valamint a listákból
-            mezok.pop(idx)
-            for r in adatok:
-                if nev in r:
-                    del r[nev]
-            if nev in listak:
-                del listak[nev]
-            refresh_listbox()
-            update_tree()
-            sync_to_server()
+        if not messagebox.askyesno("Törlés", f"Törlöd a(z) '{nev}' mezőt?"):
+            return
+        mezok.pop(idx)
+        for r in adatok:
+            r.pop(nev, None)
+        listak.pop(nev, None)
+        refresh(); update_tree(); sync_to_server()
 
-    def rename_mezo():
+    def atnevez():
         sel = lb.curselection()
         if not sel:
-            messagebox.showwarning("Figyelem", "Válassz ki egy mezőt az átnevezéshez!")
+            messagebox.showwarning("Figyelem", "Válassz ki egy mezőt!")
             return
-        idx = sel[0]
-        old = mezok[idx]
+        idx = sel[0]; old = mezok[idx]
         if old == "Azonosító":
-            messagebox.showerror("Hiba", "Az 'Azonosító' mezőt nem lehet átnevezni!")
+            messagebox.showerror("Hiba", "Az 'Azonosító' mezőt nem lehet átnevezni.")
             return
         new = simpledialog.askstring("Mező átnevezése", "Új név:", initialvalue=old, parent=ablak)
-        if new:
-            if new in mezok:
-                messagebox.showwarning("Figyelem", "Már létezik ilyen mező!")
-                return
-            # átnevezzük a mezokot
-            mezok[idx] = new
-            # az adatokban átnevezzük a kulcsokat
-            for r in adatok:
-                if old in r:
-                    r[new] = r.pop(old)
-                else:
-                    r.setdefault(new, "")
-            # ha volt listak bejegyzés az régi név alatt, áthelyezzük
-            if old in listak:
-                listak[new] = listak.pop(old)
-            refresh_listbox()
-            update_tree()
-            sync_to_server()
+        if not new: return
+        if new in mezok:
+            messagebox.showwarning("Figyelem", "Már létezik ilyen mező!")
+            return
+        mezok[idx] = new
+        for r in adatok:
+            if old in r:
+                r[new] = r.pop(old)
+            else:
+                r.setdefault(new, "")
+        if old in listak:
+            listak[new] = listak.pop(old)
+        refresh(); update_tree(); sync_to_server()
 
-    def move_up():
-        sel = lb.curselection()
-        if not sel:
-            return
+    def fel():
+        sel = lb.curselection(); 
+        if not sel: return
         idx = sel[0]
-        if idx == 0:
-            return
+        if idx == 0: return
         mezok[idx-1], mezok[idx] = mezok[idx], mezok[idx-1]
-        refresh_listbox()
-        lb.select_set(idx-1)
-        update_tree()
-        sync_to_server()
+        refresh(); lb.select_set(idx-1); update_tree(); sync_to_server()
 
-    def move_down():
-        sel = lb.curselection()
-        if not sel:
-            return
+    def le():
+        sel = lb.curselection(); 
+        if not sel: return
         idx = sel[0]
-        if idx == len(mezok)-1:
-            return
+        if idx >= len(mezok)-1: return
         mezok[idx+1], mezok[idx] = mezok[idx], mezok[idx+1]
-        refresh_listbox()
-        lb.select_set(idx+1)
-        update_tree()
-        sync_to_server()
+        refresh(); lb.select_set(idx+1); update_tree(); sync_to_server()
 
-    btn_frame = tk.Frame(ablak)
-    btn_frame.pack(pady=5)
-    tk.Button(btn_frame, text="Új mező", command=uj_mezo).grid(row=0, column=0, padx=4, pady=2)
-    tk.Button(btn_frame, text="Törlés", command=torol_mezo).grid(row=0, column=1, padx=4, pady=2)
-    tk.Button(btn_frame, text="Átnevez", command=rename_mezo).grid(row=0, column=2, padx=4, pady=2)
-    tk.Button(btn_frame, text="Fel", command=move_up).grid(row=1, column=0, padx=4, pady=2)
-    tk.Button(btn_frame, text="Le", command=move_down).grid(row=1, column=1, padx=4, pady=2)
+    btn = tk.Frame(ablak); btn.pack(pady=5)
+    tk.Button(btn, text="Új mező", command=uj).grid(row=0, column=0, padx=4, pady=2)
+    tk.Button(btn, text="Törlés", command=torol).grid(row=0, column=1, padx=4, pady=2)
+    tk.Button(btn, text="Átnevez", command=atnevez).grid(row=0, column=2, padx=4, pady=2)
+    tk.Button(btn, text="Fel", command=fel).grid(row=1, column=0, padx=4, pady=2)
+    tk.Button(btn, text="Le", command=le).grid(row=1, column=1, padx=4, pady=2)
+    tk.Button(ablak, text="Bezárás", command=ablak.destroy).pack(pady=6)
 
-    def close():
-        sync_to_server()
-        update_tree()
-        ablak.destroy()
+    ablak.transient(root); ablak.grab_set(); refresh()
 
-    tk.Button(ablak, text="Mentés és bezárás", command=close).pack(pady=6)
-
-    ablak.transient(root)
-    ablak.grab_set()
-
-# --- Sor hozzáadás / módosítás ---
+# --- Sor felvitel / módosítás ---
 def sor_beviteli_ablak(modositott_sor=None, idx=None):
-    ablak = tk.Toplevel(root)
-    ablak.title("Sor hozzáadása / módosítása")
+    ablak = tk.Toplevel(root); ablak.title("Sor hozzáadása / módosítása")
     entries = {}
 
     for i, field in enumerate(mezok):
         tk.Label(ablak, text=field).grid(row=i, column=0, padx=5, pady=5, sticky="w")
         if field == "Azonosító":
-            entry = tk.Entry(ablak, width=50)
+            e = tk.Entry(ablak, width=50)
             if modositott_sor:
-                entry.insert(0, modositott_sor.get(field, ""))
-                entry.config(state="disabled")  # Nem módosítható
+                e.insert(0, modositott_sor.get(field, ""))
+                e.config(state="disabled")
             else:
-                entry.insert(0, "Automatikusan generálva")
-                entry.config(state="disabled")
+                e.insert(0, "Automatikusan generálva"); e.config(state="disabled")
         elif field in listak:
-            entry = ttk.Combobox(ablak, values=listak[field], width=48)
+            e = ttk.Combobox(ablak, values=listak[field], width=48)
         else:
-            entry = tk.Entry(ablak, width=50)
-
-        entry.grid(row=i, column=1, padx=5, pady=5)
-
+            e = tk.Entry(ablak, width=50)
+        e.grid(row=i, column=1, padx=5, pady=5)
         if modositott_sor and field != "Azonosító":
-            ertek = modositott_sor.get(field, "")
-            if isinstance(entry, ttk.Combobox):
-                entry.set(ertek)
+            val = modositott_sor.get(field, "")
+            if isinstance(e, ttk.Combobox):
+                e.set(val)
             else:
-                entry.insert(0, ertek)
-        entries[field] = entry
+                e.insert(0, val)
+        entries[field] = e
 
     def ment():
-        sor = {field: entries[field].get() for field in entries if field != "Azonosító"}
+        sor = {f: entries[f].get() for f in entries if f != "Azonosító"}
 
-        # --- Automatikus sorszámozás Név + Fok + Beszállító szerint ---
+        # Automatikus Sorszám Név+Fok+Beszállító szerint
         nev = sor.get("Név", "").strip()
         fok = sor.get("Fok", "").strip()
-        beszallito = sor.get("Beszállító", "").strip()
-
-        if nev and fok and beszallito:
-            # megszámoljuk az eddigi hasonló sorokat
-            existing = [
-                d for d in adatok
-                if d.get("Név", "").strip() == nev
-                and d.get("Fok", "").strip() == fok
-                and d.get("Beszállító", "").strip() == beszallito
-            ]
+        besz = sor.get("Beszállító", "").strip()
+        if nev and fok and besz:
+            existing = [d for d in adatok if d.get("Név","").strip()==nev and d.get("Fok","").strip()==fok and d.get("Beszállító","").strip()==besz]
             sor["Sorszám"] = len(existing) + 1
         else:
-            sor["Sorszám"] = 1  # ha hiányzik valami, akkor 1
+            sor["Sorszám"] = 1
 
         if modositott_sor and idx is not None:
             sor["Azonosító"] = modositott_sor["Azonosító"]
             adatok[idx] = sor
-            # egy rekord upsert /update-re
-            if not api_update_row(mezok, listak, sor):
-                return
+            if not api_update_row(mezok, listak, sor): return
         else:
-            # új rekord — generáljunk egyedi azonosítót
-            azonosito = str(uuid.uuid4())
-            sor["Azonosító"] = azonosito
-            if any(d.get("Azonosító") == azonosito for d in adatok):
-                messagebox.showerror("Hiba", "Az azonosító már létezik!")
+            az = str(uuid.uuid4())
+            if any(d.get("Azonosító")==az for d in adatok):
+                messagebox.showerror("Hiba", "Az azonosító ütközik, próbáld újra.")
                 return
+            sor["Azonosító"] = az
             adatok.append(sor)
-            # és szinkron a szerverre
-            if not api_update_row(mezok, listak, sor):
-                return
+            if not api_update_row(mezok, listak, sor): return
 
         update_tree()
         ablak.destroy()
 
     tk.Button(ablak, text="Mentés", command=ment).grid(row=len(mezok), column=0, columnspan=2, pady=10)
 
-# --- Sor törlés (helyi) ---
+# --- Törlés (szerverrel együtt) ---
 def torles():
     selected = tree.selection()
     if not selected:
         messagebox.showwarning("Figyelem", "Válassz ki egy sort a törléshez!")
         return
-    if messagebox.askyesno("Törlés", "Biztosan törlöd a kiválasztott sort? (Szerverről nem törli automatikusan!)"):
-        for i in reversed(selected):
-            del adatok[int(i)]
-        sync_to_server()
-        update_tree()
-
-# --- Sor módosítás ---
-def modositas():
-    selected = tree.selection()
-    if not selected:
-        messagebox.showwarning("Figyelem", "Válassz ki egy sort a módosításhoz!")
+    if not messagebox.askyesno("Törlés", "Biztosan törlöd a kiválasztott sort/sorokat?"):
         return
-    idx = int(selected[0])
-    sor_beviteli_ablak(adatok[idx], idx)
+
+    ids = []
+    for i in selected:
+        idx = int(i)
+        if 0 <= idx < len(adatok):
+            az = adatok[idx].get("Azonosító")
+            if az: ids.append(az)
+
+    if not api_delete_rows(ids):
+        return
+
+    # helyileg is kivesszük
+    for i in sorted([int(x) for x in selected], reverse=True):
+        if 0 <= i < len(adatok):
+            del adatok[i]
+
+    update_tree()
+    # friss állapot visszahúzása biztos ami biztos
+    sync_from_server()
 
 # --- Legördülők szerkesztése ---
 def szerkesztes_legordulok():
-    ablak = tk.Toplevel(root)
-    ablak.title("Legördülők szerkesztése")
+    ablak = tk.Toplevel(root); ablak.title("Legördülők szerkesztése")
 
-    # Mező kiválasztása
     tk.Label(ablak, text="Mező kiválasztása:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-    field_combobox = ttk.Combobox(ablak, values=sorted(listak.keys()), width=30)
-    field_combobox.grid(row=0, column=1, padx=5, pady=5)
+    field_cb = ttk.Combobox(ablak, values=sorted(listak.keys()), width=30); field_cb.grid(row=0, column=1, padx=5, pady=5)
 
-    # Opció kiválasztása
     tk.Label(ablak, text="Opció kiválasztása:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-    option_combobox = ttk.Combobox(ablak, width=30)
-    option_combobox.grid(row=1, column=1, padx=5, pady=5)
+    opt_cb = ttk.Combobox(ablak, width=30); opt_cb.grid(row=1, column=1, padx=5, pady=5)
 
-    # Frissíti az opciókat a kiválasztott mező alapján
     def update_options(event=None):
-        selected_field = field_combobox.get()
-        option_combobox.set("")  # Ürítjük a comboboxot
-        if selected_field in listak:
-            option_combobox["values"] = sorted(listak[selected_field])
-        else:
-            option_combobox["values"] = []
+        f = field_cb.get(); opt_cb.set("")
+        opt_cb["values"] = sorted(listak.get(f, [])) if f in listak else []
 
-    field_combobox.bind("<<ComboboxSelected>>", update_options)
+    field_cb.bind("<<ComboboxSelected>>", update_options)
 
-    # Gombok függvényei
     def uj_opcio():
-        selected_field = field_combobox.get()
-        if not selected_field:
-            messagebox.showwarning("Figyelmeztetés", "Előbb válassz ki egy mezőt!")
+        f = field_cb.get()
+        if not f:
+            messagebox.showwarning("Figyelmeztetés", "Előbb válassz mezőt!")
             return
-        new_option = simpledialog.askstring("Új opció", "Új opció értéke:", parent=ablak)
-        if new_option and new_option not in listak.get(selected_field, []):
-            if selected_field not in listak:
-                listak[selected_field] = []
-            listak[selected_field].append(new_option)
-            update_options(None)  # Frissítjük az opciókat
-            option_combobox["values"] = sorted(listak[selected_field])
-            sync_to_server()
-            messagebox.showinfo("Siker", f"Új opció hozzáadva: {new_option}")
+        val = simpledialog.askstring("Új opció", "Új érték:", parent=ablak)
+        if not val: return
+        listak.setdefault(f, [])
+        if val not in listak[f]:
+            listak[f].append(val)
+            update_options(); opt_cb["values"] = sorted(listak[f])
+            sync_to_server(); messagebox.showinfo("Siker", f"Új opció: {val}")
 
-    def modositas_opcio():
-        selected_field = field_combobox.get()
-        selected_option = option_combobox.get()
-        if not selected_field or not selected_option:
-            messagebox.showwarning("Figyelmeztetés", "Előbb válassz ki egy mezőt és egy opciót!")
+    def mod_opcio():
+        f = field_cb.get(); old = opt_cb.get()
+        if not f or not old:
+            messagebox.showwarning("Figyelmeztetés", "Válassz mezőt és opciót!")
             return
-        new_option = simpledialog.askstring("Opció módosítás", "Új érték:", initialvalue=selected_option, parent=ablak)
-        if new_option and new_option != selected_option:
-            idx = listak[selected_field].index(selected_option)
-            listak[selected_field][idx] = new_option
-            update_options(None)  # Frissítjük az opciókat
-            option_combobox["values"] = sorted(listak[selected_field])
-            option_combobox.set(new_option)
-            sync_to_server()
-            messagebox.showinfo("Siker", f"Opció módosítva: {selected_option} -> {new_option}")
+        new = simpledialog.askstring("Opció módosítás", "Új érték:", initialvalue=old, parent=ablak)
+        if not new or new == old: return
+        i = listak[f].index(old); listak[f][i] = new
+        update_options(); opt_cb["values"] = sorted(listak[f]); opt_cb.set(new)
+        sync_to_server(); messagebox.showinfo("Siker", f"Módosítva: {old} → {new}")
 
-    def torles_opcio():
-        selected_field = field_combobox.get()
-        selected_option = option_combobox.get()
-        if not selected_field or not selected_option:
-            messagebox.showwarning("Figyelmeztetés", "Előbb válassz ki egy mezőt és egy opciót!")
+    def torol_opcio():
+        f = field_cb.get(); sel = opt_cb.get()
+        if not f or not sel:
+            messagebox.showwarning("Figyelmeztetés", "Válassz mezőt és opciót!")
             return
-        if selected_field in listak and selected_option in listak[selected_field]:
-            listak[selected_field].remove(selected_option)
-            update_options(None)  # Frissítjük az opciókat
-            option_combobox["values"] = sorted(listak[selected_field])
-            option_combobox.set("")
-            sync_to_server()
-            messagebox.showinfo("Siker", f"Opció törölve: {selected_option}")
+        listak[f].remove(sel); update_options(); opt_cb["values"] = sorted(listak[f]); opt_cb.set("")
+        sync_to_server(); messagebox.showinfo("Siker", f"Törölve: {sel}")
 
-    # Gombok hozzáadása
-    tk.Button(ablak, text="Új opció", command=uj_opcio).grid(row=2, column=1, padx=5, pady=5)
-    tk.Button(ablak, text="Opció módosítás", command=modositas_opcio).grid(row=3, column=1, padx=5, pady=5)
-    tk.Button(ablak, text="Opció törlés", command=torles_opcio).grid(row=4, column=1, padx=5, pady=5)
+    tk.Button(ablak, text="Új opció", command=uj_opcio).grid(row=2, column=1, padx=5, pady=5, sticky="e")
+    tk.Button(ablak, text="Opció módosítás", command=mod_opcio).grid(row=3, column=1, padx=5, pady=5, sticky="e")
+    tk.Button(ablak, text="Opció törlés", command=torol_opcio).grid(row=4, column=1, padx=5, pady=5, sticky="e")
 
-    # Bezáráskor szinkronizáció
     def close():
-        sync_to_server()
-        update_tree()
-        ablak.destroy()
-
+        sync_to_server(); update_tree(); ablak.destroy()
     tk.Button(ablak, text="Mentés és bezárás", command=close).grid(row=5, column=0, columnspan=2, pady=10)
 
-    ablak.transient(root)  # Megakadályozza, hogy az ablak a háttérbe kerüljön
-    ablak.grab_set()  # Fókuszban tartja az ablakot
+    ablak.transient(root); ablak.grab_set()
 
-# --- QR generálás ---
+# --- QR előnézet + nyomtatás (darabonként) ---
 def qr_generalas():
     selected = tree.selection()
     if not selected:
-        messagebox.showwarning("Figyelem", "Válassz ki legalább egy sort a QR generáláshoz!")
+        messagebox.showwarning("Figyelem", "Válassz legalább egy sort!")
         return
 
-    qr_popup = tk.Toplevel(root)
-    qr_popup.title("QR Kódok")
-    qr_popup.geometry("800x600")
-
-    canvas = tk.Canvas(qr_popup)
-    scrollbar = ttk.Scrollbar(qr_popup, orient="vertical", command=canvas.yview)
-    scrollable_frame = tk.Frame(canvas)
-
-    scrollable_frame.bind(
-        "<Configure>",
-        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-    )
-
-    canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-    canvas.configure(yscrollcommand=scrollbar.set)
-
-    canvas.pack(side="left", fill="both", expand=True)
-    scrollbar.pack(side="right", fill="y")
+    popup = tk.Toplevel(root); popup.title("QR Kódok"); popup.geometry("800x600")
+    canvas = tk.Canvas(popup); vs = ttk.Scrollbar(popup, orient="vertical", command=canvas.yview)
+    frame = tk.Frame(canvas)
+    frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.create_window((0,0), window=frame, anchor="nw"); canvas.configure(yscrollcommand=vs.set)
+    canvas.pack(side="left", fill="both", expand=True); vs.pack(side="right", fill="y")
 
     qr_images = []
 
     for i in selected:
         sor = adatok[int(i)]
-        qr_data = f"{SERVER_URL}/edit/{sor['Azonosító']}"
+        url = f"{SERVER_URL}/edit/{sor['Azonosító']}"
         qr = qrcode.QRCode(version=1, box_size=10, border=5)
-        qr.add_data(qr_data)
-        qr.make(fit=True)
+        qr.add_data(url); qr.make(fit=True)
         img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
         qr_images.append(img)
-
-        # a megjelenítéshez készítünk kicsinyített fotót
         disp = img.resize((260, 260), getattr(Image, "LANCZOS", Image.BICUBIC))
-        img_tk = ImageTk.PhotoImage(disp)
+        tkimg = ImageTk.PhotoImage(disp)
 
-        qr_item_frame = tk.Frame(scrollable_frame, borderwidth=2, relief="solid", pady=10)
-        label = tk.Label(qr_item_frame, text=f"Azonosító: {sor['Azonosító']}")
-        label.pack(pady=5)
-
-        qr_label = tk.Label(qr_item_frame, image=img_tk)
-        qr_label.image = img_tk
-        qr_label.pack(pady=(0, 10))
-
-        qr_item_frame.pack(fill="x", expand=True, padx=10)
-
-    update_tree()
+        item = tk.Frame(frame, borderwidth=2, relief="solid", pady=10)
+        tk.Label(item, text=f"Azonosító: {sor['Azonosító']}").pack(pady=5)
+        lab = tk.Label(item, image=tkimg); lab.image = tkimg; lab.pack(pady=(0,10))
+        item.pack(fill="x", expand=True, padx=10)
 
     def nyomtat():
         for img in qr_images:
             try:
-                tmpfile = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-                img.save(tmpfile.name)
-                tmpfile.close()
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+                img.save(tmp.name); tmp.close()
                 if platform.system() == "Windows":
-                    os.startfile(tmpfile.name, "print")
+                    os.startfile(tmp.name, "print")
                 else:
-                    os.system(f"lpr {tmpfile.name}")
+                    os.system(f"lpr {tmp.name}")
             except Exception as e:
-                messagebox.showerror("Nyomtatási hiba", f"Hiba történt a nyomtatás során: {e}")
+                messagebox.showerror("Nyomtatási hiba", str(e))
 
-    print_button = tk.Button(qr_popup, text="Nyomtatás", command=nyomtat)
-    print_button.pack(pady=10, side="bottom")
+    tk.Button(popup, text="Nyomtatás", command=nyomtat).pack(pady=10, side="bottom")
 
-# --- Mentés JSON ---
+# --- Lokális mentés/betöltés ---
 def ment_local():
-    path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files","*.json")])
-    if path:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"mezok": mezok, "adatok": adatok, "listak": listak}, f, ensure_ascii=False, indent=2)
-        messagebox.showinfo("Mentve", f"Adatok elmentve lokálisan: {path}")
+    path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON","*.json")])
+    if not path: return
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"mezok": mezok, "adatok": adatok, "listak": listak}, f, ensure_ascii=False, indent=2)
+    messagebox.showinfo("Mentve", f"Elmentve: {path}")
 
-# --- Betöltés JSON ---
 def betolt_local():
-    path = filedialog.askopenfilename(filetypes=[("JSON files","*.json")])
-    if path:
-        global adatok, mezok, listak
-        with open(path, "r", encoding="utf-8") as f:
-            data_to_load = json.load(f)
-            if isinstance(data_to_load, list):
-                adatok = data_to_load
-                if adatok:
-                    all_keys = set()
-                    for row in adatok:
-                        all_keys.update(row.keys())
-                    ordered_keys = fix_mezok.copy()
-                    for key in all_keys:
-                        if key not in ordered_keys:
-                            ordered_keys.append(key)
-                    mezok = ordered_keys
-                else:
-                    mezok = fix_mezok.copy()
-                listak = {}
+    path = filedialog.askopenfilename(filetypes=[("JSON","*.json")])
+    if not path: return
+    global adatok, mezok, listak
+    with open(path, "r", encoding="utf-8") as f:
+        blob = json.load(f)
+        if isinstance(blob, list):
+            adatok = blob
+            if adatok:
+                keys = set()
+                for r in adatok: keys.update(r.keys())
+                ordered = fix_mezok.copy()
+                for k in keys:
+                    if k not in ordered: ordered.append(k)
+                mezok = ordered
             else:
-                adatok = data_to_load.get("adatok", [])
-                mezok = data_to_load.get("mezok", fix_mezok.copy())
-                listak = data_to_load.get("listak", {})
+                mezok = fix_mezok.copy()
+            listak = {}
+        else:
+            adatok = blob.get("adatok", [])
+            mezok = blob.get("mezok", fix_mezok.copy())
+            listak = blob.get("listak", {})
+            listak.setdefault("Beszállító", ["Beszállító 1","Beszállító 2","Beszállító 3"])
+            listak.setdefault("Hely", ["Raktár A","Raktár B","Kijelölt hely"])
+            listak.setdefault("Osztály", ["Fénykép","Eladva","Javításra"])
+    sync_to_server(); update_tree(); messagebox.showinfo("Betöltve", path)
 
-                if "Beszállító" not in listak:
-                    listak["Beszállító"] = ["Beszállító 1", "Beszállító 2", "Beszállító 3"]
-                if "Hely" not in listak:
-                    listak["Hely"] = ["Raktár A", "Raktár B", "Kijelölt hely"]
-                if "Osztály" not in listak:
-                    listak["Osztály"] = ["Fénykép", "Eladva", "Javításra"]
-
-        sync_to_server()
-        update_tree()
-        messagebox.showinfo("Betöltve", f"Adatok betöltve lokálisan: {path}")
-
-# --- Zoom ---
-def zoom(val):
-    factor = int(val)
-    style.configure("Custom.Treeview", rowheight=int(factor * 1.5) + 10, font=("Arial", factor))
-    style.configure("Custom.Treeview.Heading", font=("Arial", factor, "bold"))
-    resize_columns()
-
-# --- Főablak ---
-root = tk.Tk()
-root.title("QR Kód Generáló - Dinamikus Mezők és Szerver Szinkron")
-
-style = ttk.Style()
-style.theme_use("default")
-
-style.configure("Custom.Treeview",
-                background="white",
-                foreground="black",
-                rowheight=25,
-                fieldbackground="white",
-                bordercolor="black",
-                borderwidth=1,
-                relief="solid",
-                font=("Arial", 10))
-style.map("Custom.Treeview",
-          background=[("selected", "#004080")],
-          foreground=[("selected", "white")])
-
-style.configure("Custom.Treeview.Heading",
-                font=("Arial", 10, "bold"),
-                bordercolor="black",
-                borderwidth=1,
-                relief="solid")
-
-frame_main = tk.Frame(root)
-frame_main.pack(fill="both", expand=True)
-
-tree = ttk.Treeview(frame_main, show="headings", selectmode="extended", style="Custom.Treeview")
-vsb_main = ttk.Scrollbar(frame_main, orient="vertical", command=tree.yview)
-hsb_main = ttk.Scrollbar(frame_main, orient="horizontal", command=tree.xview)
-tree.configure(yscrollcommand=vsb_main.set, xscrollcommand=hsb_main.set)
-vsb_main.pack(side="right", fill="y")
-hsb_main.pack(side="bottom", fill="x")
-tree.pack(fill="both", expand=True, padx=10, pady=10)
-
-# === 100% PDF nyomtató gomb függvénye ===
+# --- A4 2×2 PDF 100% nyomtatás (több kiválasztott) ---
 def pdf_100_nyomtat():
-    """
-    Multi-oldalas A4 PDF generálása (2x2 felosztás), majd 100%-os nyomtatás.
-    Windows alatt SumatraPDF-bel: -print-settings "noscale". Ha nincs Sumatra, megnyitjuk a PDF-et.
-    """
+    """Több kiválasztott rekord → A4 2x2 PDF oldalak, 100% (SumatraPDF 'noscale' ha elérhető)."""
     try:
         DPI = 300
         pages, A4_W, A4_H = build_pages_fullA4_from_selection(DPI=DPI)
-        if not pages:
-            return
-        import tempfile, os, subprocess, sys
-        # Ideiglenes PDF
+        if not pages: return
+        import subprocess, sys
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
         path = tmp.name; tmp.close()
         first, rest = pages[0], pages[1:]
         first.save(path, save_all=True, append_images=rest, resolution=DPI)
+
         # Próbáljuk SumatraPDF-et (noscale)
         candidates = [
             r"C:\Program Files\SumatraPDF\SumatraPDF.exe",
@@ -618,12 +483,8 @@ def pdf_100_nyomtat():
             os.path.join(os.path.dirname(sys.executable), "SumatraPDF.exe"),
             os.path.join(os.getcwd(), "SumatraPDF.exe"),
         ]
-        exe = None
-        for c in candidates:
-            if os.path.exists(c):
-                exe = c; break
+        exe = next((c for c in candidates if os.path.exists(c)), None)
         if exe:
-            # default printer, noscale, silent
             cmd = f'"{exe}" -print-to-default -print-settings "noscale" -silent "{path}"'
             try:
                 subprocess.run(cmd, shell=True, check=True)
@@ -631,102 +492,104 @@ def pdf_100_nyomtat():
                 return
             except Exception:
                 pass
-        # Fallback: megnyitjuk a PDF-et, hogy kézzel tudd 100%-on nyomtatni
+        # Fallback: csak megnyitjuk; ott állítsd 100%-ra
         try:
             os.startfile(path)
-            messagebox.showinfo("Nyomtatás", "Megnyílt a PDF. Válaszd a 'Tényleges méret / 100%' beállítást a nyomtatón.")
-        except Exception as e:
-            messagebox.showwarning("Figyelem", f"Nem sikerült automatikusan megnyitni a PDF-et: {path}")
+            messagebox.showinfo("PDF", "Megnyílt a PDF. Nyomtatásnál válaszd a 'Tényleges méret / 100%' opciót.")
+        except Exception:
+            messagebox.showwarning("Figyelem", f"PDF elkészült: {path}")
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        messagebox.showerror("Hiba", f"Hiba a PDF nyomtatás során: {e}")
+        import traceback; traceback.print_exc()
+        messagebox.showerror("Hiba", f"PDF hiba: {e}")
 
-# === A4 2x2 oldalépítő (100% PDF nyomtatáshoz) ===
 def build_pages_fullA4_from_selection(DPI=300):
-    """
-    A4 (210x297mm) 2x2 teljes felosztás, margó nélkül, felirat nélkül.
-    Visszatér: (pages_list, A4_W, A4_H)
-    """
+    """A4 (210x297mm) 2x2 teljes felosztás, margó nélkül."""
     selected = tree.selection()
     if not selected:
-        messagebox.showwarning("Figyelem", "Válassz ki legalább egy sort a nyomtatáshoz!")
+        messagebox.showwarning("Figyelem", "Válassz ki legalább egy sort!")
         return [], 0, 0
 
-    def mm_to_px(mm):
-        return int(round(mm / 25.4 * DPI))
-
-    A4_W = mm_to_px(210)
-    A4_H = mm_to_px(297)
-    SLOT_W = A4_W // 2
-    SLOT_H = A4_H // 2
-    LEFT_MARGIN = 0
-    TOP_MARGIN = 0
+    def mm_to_px(mm): return int(round(mm / 25.4 * DPI))
+    A4_W, A4_H = mm_to_px(210), mm_to_px(297)
+    SLOT_W, SLOT_H = A4_W // 2, A4_H // 2
     INSET = 0
 
-    # QR képek
     items = []
     for i in selected:
         sor = adatok[int(i)]
-        az = sor.get("Azonosító", "") if isinstance(sor, dict) else sor["Azonosító"]
-        qr_data = f"{SERVER_URL}/edit/{az}"
+        az = sor.get("Azonosító", "")
+        url = f"{SERVER_URL}/edit/{az}"
         qr = qrcode.QRCode(version=1, box_size=10, border=5)
-        qr.add_data(qr_data); qr.make(fit=True)
+        qr.add_data(url); qr.make(fit=True)
         img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-        items.append((img, ""))
+        items.append(img)
 
+    # Töltsük ki a 4-es oldalakat
+    from PIL import Image as PILImage
     while len(items) % 4 != 0:
-        items.append((Image.new("RGB", (300, 300), "white"), ""))
+        items.append(PILImage.new("RGB", (300, 300), "white"))
 
     pages = []
     for start in range(0, len(items), 4):
-        page = Image.new("RGB", (A4_W, A4_H), "white")
-        draw = ImageDraw.Draw(page)
+        page = PILImage.new("RGB", (A4_W, A4_H), "white")
         positions = [
-            (LEFT_MARGIN + 0 * SLOT_W, TOP_MARGIN + 0 * SLOT_H),
-            (LEFT_MARGIN + 1 * SLOT_W, TOP_MARGIN + 0 * SLOT_H),
-            (LEFT_MARGIN + 0 * SLOT_W, TOP_MARGIN + 1 * SLOT_H),
-            (LEFT_MARGIN + 1 * SLOT_W, TOP_MARGIN + 1 * SLOT_H),
+            (0 * SLOT_W, 0 * SLOT_H),
+            (1 * SLOT_W, 0 * SLOT_H),
+            (0 * SLOT_W, 1 * SLOT_H),
+            (1 * SLOT_W, 1 * SLOT_H),
         ]
-        for (qr_img, _), (x, y) in zip(items[start:start+4], positions):
+        for img, (x, y) in zip(items[start:start+4], positions):
             target_w = SLOT_W - 2 * INSET
             target_h = SLOT_H - 2 * INSET
             side = min(target_w, target_h)
-            resample = getattr(Image, 'LANCZOS', Image.BICUBIC)
-            qr_resized = qr_img.resize((side, side), resample)
-            qr_x = x + (SLOT_W - side) // 2
-            qr_y = y + (SLOT_H - side) // 2
-            page.paste(qr_resized, (qr_x, qr_y))
+            resample = getattr(PILImage, 'LANCZOS', Image.BICUBIC)
+            qr_resized = img.resize((side, side), resample)
+            paste_x = x + (SLOT_W - side) // 2
+            paste_y = y + (SLOT_H - side) // 2
+            page.paste(qr_resized, (paste_x, paste_y))
         pages.append(page)
-
     return pages, A4_W, A4_H
 
-frame = tk.Frame(root)
-frame.pack(pady=10)
+# --- Fő UI ---
+root = tk.Tk()
+root.title("QR Kód Generáló – Szerver szinkron")
 
-# --- Extra gombsor a nyomtatáshoz (külön frame-ben, hogy ne borítsa az elrendezést) ---
-frame_4up = tk.Frame(root)
-frame_4up.pack(pady=4)
-tk.Button(frame_4up, text="A4 4× QR – PDF", command=pdf_100_nyomtat).pack()
+style = ttk.Style(); style.theme_use("default")
+style.configure("Custom.Treeview", background="white", foreground="black",
+                rowheight=25, fieldbackground="white", bordercolor="black",
+                borderwidth=1, relief="solid", font=("Arial", 10))
+style.map("Custom.Treeview", background=[("selected", "#004080")], foreground=[("selected", "white")])
+style.configure("Custom.Treeview.Heading", font=("Arial", 10, "bold"), bordercolor="black", borderwidth=1, relief="solid")
+
+frame_main = tk.Frame(root); frame_main.pack(fill="both", expand=True)
+tree = ttk.Treeview(frame_main, show="headings", selectmode="extended", style="Custom.Treeview")
+vsb = ttk.Scrollbar(frame_main, orient="vertical", command=tree.yview)
+hsb = ttk.Scrollbar(frame_main, orient="horizontal", command=tree.xview)
+tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+vsb.pack(side="right", fill="y"); hsb.pack(side="bottom", fill="x")
+tree.pack(fill="both", expand=True, padx=10, pady=10)
+
+frame = tk.Frame(root); frame.pack(pady=8)
+frame_4up = tk.Frame(root); frame_4up.pack(pady=4)
 
 tk.Button(frame, text="Új sor", command=lambda: sor_beviteli_ablak()).grid(row=0, column=0, padx=5)
-tk.Button(frame, text="Módosítás", command=modositas).grid(row=0, column=1, padx=5)
+tk.Button(frame, text="Módosítás", command=lambda: sor_beviteli_ablak(adatok[int(tree.selection()[0])], int(tree.selection()[0])) if tree.selection() else messagebox.showwarning("Figyelem","Válassz sort!")).grid(row=0, column=1, padx=5)
 tk.Button(frame, text="Törlés", command=torles).grid(row=0, column=2, padx=5)
-tk.Button(frame, text="QR generálás", command=qr_generalas).grid(row=0, column=3, padx=5)
+tk.Button(frame, text="QR előnézet", command=qr_generalas).grid(row=0, column=3, padx=5)
 tk.Button(frame, text="Legördülők szerkesztése", command=szerkesztes_legordulok).grid(row=0, column=4, padx=5)
 tk.Button(frame, text="Mezők szerkesztése", command=mezok_kezelese).grid(row=0, column=5, padx=5)
-tk.Button(frame, text="Szinkronizálás szerverrel", command=sync_from_server).grid(row=0, column=6, padx=5)
-tk.Button(frame, text="Mentés szerverre", command=sync_to_server).grid(row=0, column=7, padx=5)
+tk.Button(frame, text="Szinkron (Szerver→Helyi)", command=sync_from_server).grid(row=0, column=6, padx=5)
+tk.Button(frame, text="Mentés Szerverre", command=sync_to_server).grid(row=0, column=7, padx=5)
 tk.Button(frame, text="Lokális mentés", command=ment_local).grid(row=0, column=8, padx=5)
 tk.Button(frame, text="Lokális betöltés", command=betolt_local).grid(row=0, column=9, padx=5)
 
-zoom_frame = tk.Frame(root)
-zoom_frame.pack(side="bottom", fill="x", padx=5, pady=5)
-scale = tk.Scale(zoom_frame, from_=8, to=24, orient="horizontal", command=zoom, label="Zoom")
-scale.set(10)
-scale.pack(side="right")
+tk.Button(frame_4up, text="A4 4× QR – PDF (100%)", command=pdf_100_nyomtat).pack()
 
-# Inicializálás: frissítjük a Treeview-t (ha a szerver elérhető, megpróbáljuk szinkronizálni)
+zoom_frame = tk.Frame(root); zoom_frame.pack(side="bottom", fill="x", padx=5, pady=5)
+scale = tk.Scale(zoom_frame, from_=8, to=24, orient="horizontal", command=lambda v: (style.configure("Custom.Treeview", rowheight=int(int(v)*1.5)+10, font=("Arial", int(v))), style.configure("Custom.Treeview.Heading", font=("Arial", int(v), "bold")), resize_columns()), label="Zoom")
+scale.set(10); scale.pack(side="right")
+
+# Indulás: szinkron, ha elérhető a szerver
 try:
     sync_from_server()
 except Exception:

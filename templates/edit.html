@@ -17,11 +17,10 @@
     <div class="card p-3 p-md-4">
       <div class="d-flex align-items-center justify-content-between">
         <h3 class="mb-3">Szerkesztés: <code>{{ azonosito }}</code></h3>
-        <a class="btn btn-outline-secondary" href="{{ url_for('qr_page') }}">← Vissza az új felvitelhez</a>
+        <a class="btn btn-outline-secondary" href="{{ url_for('qr_page') }}">← Vissza</a>
       </div>
 
       <form method="post">
-        <!-- Azonosító csak megjelenik, nem módosítható -->
         <div class="field">
           <label class="form-label">Azonosító</label>
           <input type="text" class="form-control" value="{{ azonosito }}" readonly>
@@ -53,9 +52,10 @@
       </form>
 
       <hr class="my-3">
-      <div class="text-muted">
-        Tipp: a legördülők tartalma a desktop appból szinkronizálódik (Mezők/Legördülők mentése a szerverre), így itt is ugyanazok az opciók jelennek meg.
-      </div>
+      <form method="post" onsubmit="return confirm('Biztosan törlöd ezt a tételt?');">
+        <input type="hidden" name="delete" value="1">
+        <button class="btn btn-outline-danger w-100" type="submit">Törlés</button>
+      </form>
     </div>
   </div>
 </body>
