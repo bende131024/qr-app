@@ -7,7 +7,7 @@ from sqlalchemy import text, Column, Integer, String, Text, inspect
 # -------------------- Flask & DB --------------------
 app = Flask(__name__, template_folder="templates")
 
-# DATABASE_URL normalizálás (Render/Postgres), fallback: helyi SQLite
+# Render/Postgres URL normalizálás, fallback: helyi SQLite
 db_url = os.environ.get("DATABASE_URL", "sqlite:///adatok.db")
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
@@ -21,7 +21,7 @@ db = SQLAlchemy(app)
 class Adat(db.Model):
     __tablename__ = "adat"
     id = Column(Integer, primary_key=True)
-    azonosito = Column(String(64), unique=True, nullable=True)  # régi DB-kben hiányozhat, pótoljuk
+    azonosito = Column(String(64), unique=True, nullable=True)  # régi DB-ben hiányozhat; pótoljuk
     data = Column(Text)                                         # JSON szöveg
     deleted = Column(Integer, default=0)                        # 0=aktív, 1=törölt (soft delete)
 
@@ -29,6 +29,18 @@ class MetaKV(db.Model):
     __tablename__ = "meta_kv"
     key = Column(String(64), primary_key=True)
     value = Column(Text)
+
+# --- Alap mezők és legördülők, ha meta még üres ---
+DEFAULT_FIELDS = [
+    "Azonosító", "Sorszám", "Fémzárszám",
+    "Beszállító", "Név", "Fok", "Hely",
+    "Súly", "Megjegyzés", "Osztály",
+]
+DEFAULT_LISTS = {
+    "Beszállító": ["Beszállító 1", "Beszállító 2", "Beszállító 3"],
+    "Hely": ["Raktár A", "Raktár B", "Kijelölt hely"],
+    "Osztály": ["Fénykép", "Eladva", "Javításra"],
+}
 
 # -------------------- Segédek --------------------
 def gen_id(n=8) -> str:
@@ -67,9 +79,7 @@ def ensure_schema():
         if "azonosito" not in cols:
             conn.execute(text("ALTER TABLE adat ADD COLUMN azonosito TEXT"))
         if "deleted" not in cols:
-            # mindkét dialektus érti ezt a szintaxist
             conn.execute(text("ALTER TABLE adat ADD COLUMN deleted INTEGER DEFAULT 0"))
-        # index az azonosítóra
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_adat_azonosito ON adat(azonosito)"))
 
     # régi sorok azonosítójának feltöltése + deleted alapérték
@@ -83,7 +93,6 @@ def ensure_schema():
             base = (rec.get("Azonosító") or "").strip().upper() or gen_id()
             cand = base
             n = 1
-            # ütközés esetén sorszámozzuk
             while Adat.query.filter_by(azonosito=cand).first():
                 n += 1
                 cand = f"{base}-{n}"
@@ -93,9 +102,13 @@ def ensure_schema():
     db.session.commit()
 
 def load_meta_defaults():
-    """Ha nincs mentett meta, a meglévő aktív rekordokból képezünk mezőlistát és legördülő javaslatokat."""
-    mezok = ["Azonosító"]
-    listak = {}
+    """
+    Ha nincs mentett meta, adjunk vissza egy értelmes alapot,
+    és egészítsük ki a meglévő aktív rekordok kulcsaival / opcióival.
+    """
+    mezok = DEFAULT_FIELDS.copy()
+    listak = {k: v[:] for k, v in DEFAULT_LISTS.items()}
+
     try:
         for a in Adat.query.filter_by(deleted=0).all():
             try:
@@ -105,20 +118,22 @@ def load_meta_defaults():
             for k, v in rec.items():
                 if k not in mezok:
                     mezok.append(k)
-                if isinstance(v, str):
-                    if k not in listak:
-                        listak[k] = set()
-                    if v.strip() and len(listak[k]) < 50:
-                        listak[k].add(v.strip())
-        listak = {k: sorted(list(vs)) for k, vs in listak.items() if vs}
+                if isinstance(v, str) and v.strip():
+                    listak.setdefault(k, [])
+                    if v not in listak[k] and len(listak[k]) < 50:
+                        listak[k].append(v)
     except Exception:
         pass
-    # Azonosító mindig első
+
     mezok = ["Azonosító"] + [m for m in mezok if m != "Azonosító"]
     return {"mezok": mezok, "listak": listak}
 
 def load_meta():
-    """Mentett meta beolvasása, különben default generálása."""
+    """
+    Mentett meta beolvasása. Ha nincs, vagy csak 'Azonosító' lenne,
+    használjuk az alapértékeket (DEFAULT_FIELDS/DEFAULT_LISTS),
+    és egészítsük ki az adatbázisból tanult opciókkal.
+    """
     out = {"mezok": [], "listak": {}}
     try:
         m1 = MetaKV.query.get("mezok")
@@ -128,10 +143,24 @@ def load_meta():
         if m2 and m2.value:
             out["listak"] = json.loads(m2.value)
     except Exception:
-        pass
-    if not out["mezok"]:
+        out = {"mezok": [], "listak": {}}
+
+    # nincs érdemi meta → töltsünk alapot az adatbázis alapján
+    if not out["mezok"] or len([x for x in out["mezok"] if x != "Azonosító"]) == 0:
         out = load_meta_defaults()
-    out["mezok"] = ["Azonosító"] + [m for m in out["mezok"] if m != "Azonosító"]
+    else:
+        # Azonosító mindig első
+        out["mezok"] = ["Azonosító"] + [m for m in out["mezok"] if m != "Azonosító"]
+        # alap listák hozzáfűzése duplázás nélkül
+        for k, defaults in DEFAULT_LISTS.items():
+            cur = out["listak"].get(k, [])
+            if not isinstance(cur, list):
+                cur = []
+            for val in defaults:
+                if val not in cur:
+                    cur.append(val)
+            out["listak"][k] = cur
+
     return out
 
 def save_meta(mezok, listak):
@@ -192,7 +221,6 @@ def data_update():
     for rec in adatok:
         if not isinstance(rec, dict):
             continue
-        # ha minden üres az Azonosítón kívül → ne tároljuk
         if is_all_empty_except_id(rec):
             continue
 
@@ -236,7 +264,6 @@ def delete_one(azonosito):
         abort(404)
     row.deleted = 1
     db.session.commit()
-    # JSON kérésre JSON válasz
     if request.is_json or request.headers.get("Accept","").startswith("application/json"):
         return jsonify({"ok": True})
     return redirect(url_for("qr_page"))
@@ -309,7 +336,6 @@ def edit_row(azonosito):
             else:
                 new_rec[f] = request.form.get(f, "")
 
-        # üres rekordot ne tartsuk meg
         if is_all_empty_except_id(new_rec):
             row.deleted = 1
         else:
